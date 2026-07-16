@@ -17,94 +17,141 @@ class ReaderScreen extends StatefulWidget {
   State<ReaderScreen> createState() => _ReaderScreenState();
 }
 
+// عنصر واحد فالقائمة: إما فاصل بداية فصل، أو صفحة صورة
+class _ReaderItem {
+  final bool isChapterHeader;
+  final String? imageUrl;
+  final Chapter? chapter;
+
+  _ReaderItem.header(this.chapter)
+      : isChapterHeader = true,
+        imageUrl = null;
+
+  _ReaderItem.page(this.imageUrl)
+      : isChapterHeader = false,
+        chapter = null;
+}
+
 class _ReaderScreenState extends State<ReaderScreen> {
   final MangaDexApi _api = MangaDexApi();
-  late int _currentIndex;
-  late Future<List<String>> _pagesFuture;
+  final ScrollController _scrollController = ScrollController();
+  final List<_ReaderItem> _items = [];
+
+  int _nextChapterIndex = 0;
+  bool _isLoadingMore = false;
+  bool _hasMore = true;
+  Chapter? _currentTopChapter;
 
   @override
   void initState() {
     super.initState();
-    _currentIndex = widget.initialIndex;
-    _loadPages();
+    _nextChapterIndex = widget.initialIndex;
+    _currentTopChapter = widget.chapters[widget.initialIndex];
+    _loadNextChapter();
+    _scrollController.addListener(_onScroll);
   }
 
-  void _loadPages() {
-    final chapter = widget.chapters[_currentIndex];
-    _pagesFuture = _api.fetchChapterPages(chapter.id);
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
   }
 
-  void _goToChapter(int newIndex) {
-    if (newIndex < 0 || newIndex >= widget.chapters.length) return;
-    setState(() {
-      _currentIndex = newIndex;
-      _loadPages();
-    });
+  void _onScroll() {
+    if (_isLoadingMore || !_hasMore) return;
+    final threshold = _scrollController.position.maxScrollExtent - 800;
+    if (_scrollController.position.pixels >= threshold) {
+      _loadNextChapter();
+    }
+  }
+
+  Future<void> _loadNextChapter() async {
+    if (_nextChapterIndex >= widget.chapters.length) {
+      setState(() => _hasMore = false);
+      return;
+    }
+    setState(() => _isLoadingMore = true);
+
+    final chapter = widget.chapters[_nextChapterIndex];
+    try {
+      final pages = await _api.fetchChapterPages(chapter.id);
+      setState(() {
+        _items.add(_ReaderItem.header(chapter));
+        _items.addAll(pages.map((url) => _ReaderItem.page(url)));
+        _nextChapterIndex++;
+        _isLoadingMore = false;
+      });
+    } catch (e) {
+      setState(() => _isLoadingMore = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final chapter = widget.chapters[_currentIndex];
-    final hasNext = _currentIndex < widget.chapters.length - 1;
-    final hasPrev = _currentIndex > 0;
-
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: Text('الفصل ${chapter.chapterNumber ?? '?'}'),
+        title: Text(
+          _currentTopChapter != null
+              ? 'الفصل ${_currentTopChapter!.chapterNumber ?? '?'}'
+              : 'القراءة',
+        ),
       ),
-      body: FutureBuilder<List<String>>(
-        future: _pagesFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: Text(
-                'خطأ: ${snapshot.error}',
-                style: const TextStyle(color: Colors.white),
-              ),
-            );
-          }
-          final pages = snapshot.data ?? [];
-          return PageView.builder(
-            itemCount: pages.length,
-            itemBuilder: (context, index) {
-              return InteractiveViewer(
-                child: CachedNetworkImage(
-                  imageUrl: pages[index],
-                  fit: BoxFit.contain,
-                  placeholder: (c, u) => const Center(
-                    child: CircularProgressIndicator(),
-                  ),
-                  errorWidget: (c, u, e) => const Icon(
-                    Icons.broken_image,
-                    color: Colors.white,
+      body: ListView.builder(
+        controller: _scrollController,
+        itemCount: _items.length + 1,
+        itemBuilder: (context, index) {
+          if (index == _items.length) {
+            if (!_hasMore) {
+              return const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(
+                  child: Text(
+                    'وصلت لآخر فصل متاح',
+                    style: TextStyle(color: Colors.white70),
                   ),
                 ),
               );
-            },
+            }
+            return const Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(child: CircularProgressIndicator()),
+            );
+          }
+
+          final item = _items[index];
+
+          if (item.isChapterHeader) {
+            return Container(
+              width: double.infinity,
+              color: Colors.grey[900],
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                'الفصل ${item.chapter!.chapterNumber ?? '?'} ${item.chapter!.title ?? ''}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+              ),
+            );
+          }
+
+          return CachedNetworkImage(
+            imageUrl: item.imageUrl!,
+            httpHeaders: const {'Referer': 'https://mangadex.org/'},
+            fit: BoxFit.fitWidth,
+            width: double.infinity,
+            placeholder: (c, u) => Container(
+              height: 400,
+              color: Colors.grey[900],
+              child: const Center(child: CircularProgressIndicator()),
+            ),
+            errorWidget: (c, u, e) => Container(
+              height: 200,
+              color: Colors.grey[900],
+              child: const Icon(Icons.broken_image, color: Colors.white54),
+            ),
           );
         },
-      ),
-      bottomNavigationBar: BottomAppBar(
-        color: Colors.grey[900],
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            TextButton.icon(
-              onPressed: hasPrev ? () => _goToChapter(_currentIndex - 1) : null,
-              icon: const Icon(Icons.arrow_back_ios),
-              label: const Text('الفصل السابق'),
-            ),
-            TextButton.icon(
-              onPressed: hasNext ? () => _goToChapter(_currentIndex + 1) : null,
-              icon: const Icon(Icons.arrow_forward_ios),
-              label: const Text('الفصل التالي'),
-            ),
-          ],
-        ),
       ),
     );
   }
